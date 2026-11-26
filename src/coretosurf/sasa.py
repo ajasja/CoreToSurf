@@ -4,6 +4,8 @@ This module has no Qt dependency, so it can be used from scripts and from the
 ``coretosurf`` PyMOL command as well as from the GUI.
 """
 
+import math
+
 from pymol import cmd
 
 # Theoretical maximum ASA per residue (Å²), Tien et al. 2013, PLoS ONE 8:e80635.
@@ -24,25 +26,114 @@ DEFAULT_MAX_ASA = 200.0  # fallback for residues without a reference value
 LAYERS = ("core", "boundary", "surface")
 COLORS = {"core": "tv_orange", "boundary": "tv_green", "surface": "marine"}
 
+# SASA units:
+#   abs - absolute SASA in Å²
+#   rel - % of the theoretical maximum ASA of the residue type (MAX_ASA)
+#   iso - % of the SASA of the same residue in isolation: the residue in its
+#         own conformation with only its own atoms occluding (as sasa_gemmi's
+#         sasa_pct). Needs no reference table, so it works for any residue
+#         type (nucleotides, modified residues) and accounts for the actual
+#         side-chain conformation.
+UNITS = ("abs", "rel", "iso")
+
 # Default cutoffs per unit: (core, boundary).
 # Absolute values follow Rosetta's LayerSelector SASA mode.
-DEFAULT_CUTOFFS = {"abs": (20.0, 40.0), "rel": (20.0, 50.0)}
+DEFAULT_CUTOFFS = {"abs": (20.0, 40.0), "rel": (20.0, 50.0),
+                   "iso": (20.0, 50.0)}
+
+# Upper bound of an atom's probe-extended radius (vdW + 1.4 Å probe), used to
+# keep isolated residues far enough apart not to see each other.
+_MAX_EXT_RADIUS = 5.0
 
 # Cache: (object, state) -> {"natoms": int, "residues": [Residue, ...]}
 _cache = {}
 
 
 class Residue(object):
-    __slots__ = ("segi", "chain", "resi", "resn", "sasa", "rel")
+    __slots__ = ("segi", "chain", "resi", "resn", "sasa", "sasa_iso",
+                 "rel", "iso")
 
-    def __init__(self, segi, chain, resi, resn, sasa):
+    def __init__(self, segi, chain, resi, resn, sasa, sasa_iso):
         self.segi, self.chain, self.resi, self.resn = segi, chain, resi, resn
         self.sasa = sasa
+        self.sasa_iso = sasa_iso
         ref = MAX_ASA.get(ALIASES.get(resn, resn), DEFAULT_MAX_ASA)
         self.rel = 100.0 * sasa / ref
+        self.iso = 100.0 * sasa / sasa_iso if sasa_iso > 0.0 else 0.0
 
     def value(self, unit):
-        return self.rel if unit == "rel" else self.sasa
+        if unit == "rel":
+            return self.rel
+        if unit == "iso":
+            return self.iso
+        return self.sasa
+
+
+def _spread_residues(obj):
+    """Move the residues of ``obj`` (state 1) apart on a cubic grid.
+
+    Afterwards no atom is within reach of an atom of another residue, so one
+    ``get_area`` call gives the isolated SASA of every residue. Each residue
+    is translated rigidly, so its conformation is unchanged.
+    """
+    coords, order = {}, []
+
+    def add(segi, chain, resi, x, y, z):
+        key = (segi, chain, resi)
+        if key not in coords:
+            coords[key] = []
+            order.append(key)
+        coords[key].append((x, y, z))
+
+    cmd.iterate_state(1, obj, "add(segi, chain, resi, x, y, z)",
+                      space={"add": add})
+    if not order:
+        return
+
+    centers, rmax = {}, 0.0
+    for key, pts in coords.items():
+        n = float(len(pts))
+        c = (sum(p[0] for p in pts) / n, sum(p[1] for p in pts) / n,
+             sum(p[2] for p in pts) / n)
+        centers[key] = c
+        for p in pts:
+            rmax = max(rmax, math.sqrt((p[0] - c[0]) ** 2 +
+                                       (p[1] - c[1]) ** 2 +
+                                       (p[2] - c[2]) ** 2))
+    spacing = 2.0 * (rmax + _MAX_EXT_RADIUS) + 1.0
+    side = max(1, int(math.ceil(len(order) ** (1.0 / 3.0))))
+    while side ** 3 < len(order):  # guard against rounding of the cube root
+        side += 1
+
+    shift = {}
+    for i, key in enumerate(order):
+        c = centers[key]
+        shift[key] = ((i % side) * spacing - c[0],
+                      (i // side % side) * spacing - c[1],
+                      (i // (side * side)) * spacing - c[2])
+
+    def move(segi, chain, resi, x, y, z):
+        d = shift[(segi, chain, resi)]
+        return x + d[0], y + d[1], z + d[2]
+
+    cmd.alter_state(1, obj, "(x, y, z) = move(segi, chain, resi, x, y, z)",
+                    space={"move": move})
+
+
+def _residue_sums(selection):
+    """{(segi, chain, resi): [resn, sum of b]} and the key order."""
+    sums, order = {}, []
+
+    def add(segi, chain, resi, resn, b):
+        key = (segi, chain, resi)
+        if key not in sums:
+            sums[key] = [resn, 0.0]
+            order.append(key)
+        sums[key][1] += b
+
+    cmd.iterate(selection, "add(segi, chain, resi, resn, b)",
+                space={"add": add})
+    return sums, order
 
 
 def _compute(obj, state):
@@ -50,7 +141,9 @@ def _compute(obj, state):
 
     Waters and hydrogens are removed first. Ligands and other hetero atoms are
     kept so that they occlude the polymer, but only polymer residues are
-    reported.
+    reported. For each residue the isolated SASA (the residue alone, in the
+    same conformation) is computed as well, as the reference for the ``iso``
+    unit.
     """
     tmp = cmd.get_unused_name("_c2s_tmp")
     try:
@@ -59,24 +152,20 @@ def _compute(obj, state):
         cmd.set("dot_solvent", 1, tmp)
         cmd.set("dot_density", 3, tmp)
         cmd.get_area(tmp, state=1, load_b=1)
+        sums, order = _residue_sums("%s and polymer" % tmp)
 
-        sums = {}
-        order = []
-
-        def add(segi, chain, resi, resn, b):
-            key = (segi, chain, resi)
-            if key not in sums:
-                sums[key] = [resn, 0.0]
-                order.append(key)
-            sums[key][1] += b
-
-        cmd.iterate("%s and polymer" % tmp,
-                    "add(segi, chain, resi, resn, b)",
-                    space={"add": add})
+        # Isolated reference: keep only the polymer, pull the residues apart
+        # and compute the SASA again with the same settings.
+        cmd.remove("%s and not polymer" % tmp)
+        _spread_residues(tmp)
+        cmd.get_area(tmp, state=1, load_b=1)
+        iso, _ = _residue_sums(tmp)
     finally:
         cmd.delete(tmp)
 
-    return [Residue(k[0], k[1], k[2], sums[k][0], sums[k][1]) for k in order]
+    return [Residue(k[0], k[1], k[2], sums[k][0], sums[k][1],
+                    iso.get(k, ("", 0.0))[1])
+            for k in order]
 
 
 def get_residues(obj, state=-1, force=False):

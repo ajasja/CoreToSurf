@@ -8,7 +8,7 @@ from . import sasa
 Qt = QtCore.Qt
 
 # Slider ranges per unit: (maximum, label)
-UNIT_RANGE = {"abs": (100, "Å²"), "rel": (100, "%")}
+UNIT_RANGE = {"abs": (100, "Å²"), "rel": (100, "%"), "iso": (100, "%")}
 
 
 class CoreToSurfWindow(QtWidgets.QWidget):
@@ -42,10 +42,21 @@ class CoreToSurfWindow(QtWidgets.QWidget):
         row.addWidget(QtWidgets.QLabel("SASA units:"))
         self.abs_radio = QtWidgets.QRadioButton("Absolute (Å²)")
         self.rel_radio = QtWidgets.QRadioButton("Relative (% of max ASA)")
+        self.rel_radio.setToolTip(
+            "SASA as % of the theoretical maximum ASA of the residue type "
+            "(Tien et al. 2013).")
+        self.iso_radio = QtWidgets.QRadioButton("Relative (% of isolated)")
+        self.iso_radio.setToolTip(
+            "SASA as % of the SASA of the same residue alone, in its own "
+            "conformation. Works for any residue type.")
         self.abs_radio.setChecked(True)
-        self.abs_radio.toggled.connect(self._on_unit_changed)
-        row.addWidget(self.abs_radio)
-        row.addWidget(self.rel_radio)
+        self.unit_radios = {"abs": self.abs_radio, "rel": self.rel_radio,
+                            "iso": self.iso_radio}
+        for radio in self.unit_radios.values():
+            # Only react to the newly checked button, not the unchecked one.
+            radio.toggled.connect(
+                lambda checked: checked and self._on_unit_changed())
+            row.addWidget(radio)
         row.addStretch(1)
         layout.addLayout(row)
 
@@ -211,8 +222,9 @@ class CoreToSurfWindow(QtWidgets.QWidget):
     def _on_bound_edited(self):
         self._on_edited(1, self.bound_edit)
 
-    def _on_unit_changed(self, _checked):
-        self.unit = "abs" if self.abs_radio.isChecked() else "rel"
+    def _on_unit_changed(self):
+        self.unit = next(u for u, radio in self.unit_radios.items()
+                         if radio.isChecked())
         self._apply_unit_to_sliders()
         self.update_selection()
 

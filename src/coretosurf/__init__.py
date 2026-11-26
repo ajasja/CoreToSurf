@@ -37,7 +37,8 @@ ARGUMENTS
     object = molecular object (default: first object)
     core = residues with SASA below this are core
     boundary = residues with SASA below this (and >= core) are boundary
-    unit = abs (Å², default 20/40) or rel (% of max ASA, default 20/50)
+    unit = abs (Å², default 20/40), rel (% of max ASA, default 20/50) or
+           iso (% of the SASA of the residue in isolation, default 20/50)
     recompute = 1 to discard the cached SASA first
 
     With no arguments, opens the GUI.
@@ -54,7 +55,7 @@ ARGUMENTS
         selection = names[0]
     unit = str(unit).lower()
     if unit not in sasa.DEFAULT_CUTOFFS:
-        raise ValueError("unit must be 'abs' or 'rel'")
+        raise ValueError("unit must be 'abs', 'rel' or 'iso'")
     dcore, dbound = sasa.DEFAULT_CUTOFFS[unit]
     core = dcore if core is None else float(core)
     boundary = dbound if boundary is None else float(boundary)
@@ -165,6 +166,8 @@ def __init_plugin__(app=None):
 if cmd is not None:
     cmd.extend("coretosurf", coretosurf)
     cmd.auto_arg[0]["coretosurf"] = cmd.auto_arg[0]["zoom"]
+    cmd.auto_arg[3]["coretosurf"] = [
+        lambda: cmd.Shortcut(["abs", "rel", "iso"]), "unit", ", "]
     cmd.extend("print_sel", print_sel)
     cmd.auto_arg[0]["print_sel"] = cmd.auto_arg[0]["zoom"]
     cmd.auto_arg[1]["print_sel"] = [

@@ -83,8 +83,16 @@ If you installed with Option C, remove it in *Plugin → Plugin Manager*.
 ## Window
 
 - **Object**: the molecular object to classify (*Refresh list* after loading new ones).
-- **SASA units**: absolute (Å², slider 0–100) or relative (% of the theoretical
-  maximum ASA from Tien et al. 2013, slider 0–100). Each unit remembers its own cutoffs.
+- **SASA units** (each unit remembers its own cutoffs):
+  - *Absolute* (Å², slider 0–100).
+  - *Relative (% of max ASA)*: % of the theoretical maximum ASA of the residue
+    type from Tien et al. 2013 (slider 0–100). Residue types without a
+    reference value use 200 Å².
+  - *Relative (% of isolated)*: % of the SASA of the same residue on its own,
+    in its own conformation, with only its own atoms occluding (slider 0–100).
+    It needs no reference table, so it works for any polymer residue
+    (nucleotides, modified residues) and accounts for the actual side-chain
+    conformation.
 - **Core cutoff**: residues with SASA below this value are core.
 - **Boundary cutoff**: residues with SASA from the core cutoff up to this value are
   boundary. Residues at or above it are surface. The two cutoffs are kept so that core ≤ boundary.
@@ -108,14 +116,16 @@ If you installed with Option C, remove it in *Plugin → Plugin Manager*.
 The plugin creates three selections named `core`, `boundary` and `surface`, and
 colors their carbon atoms. The representation is not changed.
 
-Default cutoffs: 20 / 40 Å² (Rosetta LayerSelector SASA mode) and 20 / 50 %.
+Default cutoffs: 20 / 40 Å² (Rosetta LayerSelector SASA mode) and 20 / 50 %
+for both relative units.
 
 ## PyMOL command
 
 ```
 coretosurf                      # open the GUI
 coretosurf 1ubq, 20, 40         # absolute Å²
-coretosurf 1ubq, 20, 50, rel    # relative %
+coretosurf 1ubq, 20, 50, rel    # % of max ASA (Tien et al. 2013)
+coretosurf 1ubq, 20, 50, iso    # % of the isolated residue
 coretosurf 1ubq, recompute=1    # force SASA recalculation
 ```
 
@@ -141,6 +151,10 @@ from several objects that share a chain and residue number appear once.
 - Waters and hydrogens are removed before the calculation. Ligands and other
   hetero atoms are kept so they occlude the polymer, but only polymer residues
   are classified.
+- For the *% of isolated* unit, the isolated SASA of every polymer residue is
+  computed in the same pass: ligands are removed from the temporary copy, the
+  residues are moved rigidly apart on a grid so that none occludes another,
+  and `get_area` is run again with the same settings.
 - The result is cached. Moving a slider only reclassifies the cached values.
 - The cache is invalidated automatically when the object's atom count changes.
   After other edits, such as moving atoms, changing coordinates or renumbering
